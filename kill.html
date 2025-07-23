@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<title>FPS Shooter Funzionale</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #222; color: #fff; font-family: Arial, sans-serif;}
+  #hud {
+    position: fixed; top: 10px; left: 10px; z-index: 100; font-size: 18px;
+    user-select: none;
+  }
+  #instructions {
+    position: fixed; top: 50%; width: 100%; text-align: center; color: #aaa;
+    font-size: 24px; user-select: none; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="hud">
+  Ammo: <span id="ammo">20</span> | 
+  Kills: <span id="kills">0</span> | 
+  Coins: <span id="coins">0</span> | 
+  Health: <span id="health">100</span>
+</div>
+<div id="instructions">
+  Clicca per iniziare (WASD + mouse per muoverti e guardare)<br>
+  Click destro per zoom
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.152.2/examples/js/controls/PointerLockControls.js"></script>
+
+<script>
+(() => {
+  // --- Setup scena, camera, renderer ---
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x222222);
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+  camera.position.y = 2;
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Luce ambiente e direzionale
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+  dirLight.position.set(10,20,10);
+  scene.add(dirLight);
+
+  // Terreno
+  const floorGeo = new THREE.PlaneGeometry(200, 200);
+  const floorMat = new THREE.MeshStandardMaterial({color:0x444444});
+  const floor = new THREE.Mesh(floorGeo, floorMat);
+  floor.rotation.x = -Math.PI/2;
+  scene.add(floor);
+
+  // Controlli FPS
+  const controls = new THREE.PointerLockControls(camera, document.body);
+  const instructions = document.getElementById('instructions');
+  instructions.addEventListener('click', () => controls.lock());
+  controls.addEventListener('lock', () => instructions.style.display = 'none');
+  controls.addEventListener('unlock', () => instructions.style.display = '');
+
+  scene.add(controls.getObject());
+
+  // --- Stato gioco e variabili ---
+  let move = {forward:false, backward:false, left:false, right:false};
+  let velocity = new THREE.Vector3();
+  let direction = new THREE.Vector3();
+  const bullets = [];
+  const bulletSpeed = 4;
+  let ammo = 20;
+  let reloading = false;
+  let kills = 0;
+  let coins = 0;
+  let health = 100;
+  let playerHitCount = 0;
+  const MAX_PLAYER_HIT = 5;
+  const RELOAD_TIME = 3000;
+  let zoomed = false;
+
+  // Nemici ed elicotteri
+  const enemies = [];
+  const helicopters = [];
+
+  // HUD
+  const hud = {
+    ammo: document.getElementById('ammo'),
+    kills: document.getElementById('kills'),
+    coins: document.getElementById('coins'),
+    health: document.getElementById('health'),
+  };
+
+  function updateHUD(){
+    hud.ammo.textContent = ammo;
+    hud.kills.textContent = kills;
+    hud.coins.textContent = coins;
+    hud.health.textContent = health;
+  }
+
+  // Movimento tastiera
+  window.addEventListener('keydown', e => {
+    switch(e.code){
+      case 'KeyW': move.forward = true; break;
+      case 'KeyS': move.backward = true; break;
+      case 'KeyA': move.left = true; break;
+      case 'KeyD': move.right = true; break;
+    }
+  });
+  window.addEventListener('keyup', e => {
+    switch(e.code){
+      case 'KeyW': move.forward = false; break;
+      case 'KeyS': move.backward = false; break;
+      case 'KeyA': move.left = false; break;
+      case 'KeyD': move.right = false; break;
+    }
+  });
+
+  // Zoom con tasto destro
+  window.addEventListener('mousedown', e => {
+    if(e.button === 2){
+      zoom(true);
+    } else if(e.button === 0){
+      shoot();
+    }
+  });
+  window.addEventListener('mouseup', e => {
+    if(e.button === 2){
+      zoom(false);
+    }
+  });
+  // Impedisci menu contestuale click destro
+  window.addEventListener('contextmenu', e => e.preventDefault());
+
+  function zoom(state){
+    zoomed = state;
+    camera.fov = zoomed ? 30 : 75;
+    camera.updateProjectionMatrix();
+  }
+
+  // Spawn nemici rossi (1 vita)
+  function spawnEnemies(count){
+    for(let i=0; i<count; i++){
+      const geo = new THREE.BoxGeometry(1,2,1);
+      const mat = new THREE.MeshStandardMaterial({color:0xff0000});
+      const enemy = new THREE.Mesh(geo, mat);
+      enemy.position.set(Math.random()*180 - 90, 1, Math.random()*180 - 90);
+      enemy.userData = {life:1, isAlive:true, lastShotTime:0};
+      enemies.push(enemy);
+      scene.add(enemy);
+    }
+  }
+
+  // Spawn elicotteri blu (3 vite)
+  function spawnHelicopters(count){
+    for(let i=0; i<count; i++){
+      const geo = new THREE.BoxGeometry(3,1.5,5);
+      const mat = new THREE.MeshStandardMaterial({color:0x0000ff});
+      const heli = new THREE.Mesh(geo, mat);
+      heli.position.set(Math.random()*180 - 90, 5, Math.random()*180 - 90);
+      heli.userData = {life:3, isAlive:true, lastShotTime:0};
+      helicopters.push(heli);
+      scene.add(heli);
+    }
+  }
+
+  // Spara proiettile
+  function shoot(){
+    if(!controls.isLocked || ammo <= 0 || reloading) return;
+    const geometry = new THREE.SphereGeometry(0.1, 8, 8);
+    const material = new THREE.MeshBasicMaterial({color: 0xffff00});
+    const bullet = new THREE.Mesh(geometry, material);
+    const direction = new THREE.Vector3();
+    camera.getWorldDirection(direction);
+    bullet.position.copy(camera.position);
+    bullet.userData = {direction};
+    bullets.push(bullet);
+    scene.add(bullet);
+
+    ammo--;
+    updateHUD();
+
+    if(ammo === 0) reloadAmmo();
+  }
+
+  // Ricarica
+  function reloadAmmo(){
+    reloading = true;
+    setTimeout(() => {
+      ammo = 20;
+      reloading = false;
+      updateHUD();
+    }, RELOAD_TIME);
+  }
+
+  // Controlla se un nemico deve sparare
+  // Nemici sparano solo se spari vicino (entro 10 unità)
+  // Colpiscono il giocatore con 15% di probabilità a ogni colpo
+  function enemiesShoot(time){
+    if(!controls.isLocked) return;
+    const playerPos = controls.getObject().position;
+
+    enemies.forEach(enemy => {
+      if(!enemy.userData.isAlive) return;
+      const dist = enemy.position.distanceTo(playerPos);
+      if(dist <= 10 && ammo < 20){  // ammo < 20 indica che hai sparato almeno 1 colpo
+        if(time - enemy.userData.lastShotTime > 1500){
+          enemy.userData.lastShotTime = time;
+          // 15% probabilità di colpire il giocatore
+          if(Math.random() < 0.15){
+            playerHitCount++;
+            health -= 20;
+            if(health < 0) health = 0;
+            updateHUD();
+            if(playerHitCount >= MAX_PLAYER_HIT){
+              playerDies();
+            }
+          }
+        }
+      }
+    });
+    helicopters.forEach(heli => {
+      if(!heli.userData.isAlive) return;
+      const dist = heli.position.distanceTo(playerPos);
+      if(dist <= 15 && ammo < 20){
+        if(time - heli.userData.lastShotTime > 2000){
+          heli.userData.lastShotTime = time;
+          if(Math.random() < 0.15){
+            playerHitCount++;
+            health -= 20;
+            if(health < 0) health = 0;
+            updateHUD();
+            if(playerHitCount >= MAX_PLAYER_HIT){
+              playerDies();
+            }
+          }
+        }
+      }
+    });
+  }
+
+  // Gestisci collisioni proiettili con nemici o elicotteri
+  function checkBulletHits(){
+    bullets.forEach((bullet, i) => {
+      bullet.position.addScaledVector(bullet.userData.direction, bulletSpeed);
+
+      // Rimuovi proiettile se troppo lontano
+      if(bullet.position.distanceTo(camera.position) > 100){
+        scene.remove(bullet);
+        bullets.splice(i, 1);
+        return;
+      }
+
+      // Controlla collisioni con nemici
+      enemies.forEach(enemy => {
+        if(!enemy.userData.isAlive) return;
+        if(enemy.position.distanceTo(bullet.position) < 1.2){
+          // Muore con 1 colpo
+          enemy.userData.isAlive = false;
+          scene.remove(enemy);
+          kills++;
+          coins += 5;
+          updateHUD();
+          // Rimuovi proiettile
+          scene.remove(bullet);
+          bullets.splice(i,1);
+        }
+      });
+
+      // Controlla collisioni con elicotteri
+      helicopters.forEach(heli => {
+        if(!heli.userData.isAlive) return;
+        if(heli.position.distanceTo(bullet.position) < 2){
+          heli.userData.life--;
+          if(heli.userData.life <= 0){
+            heli.userData.isAlive = false;
+            scene.remove(heli);
+            kills++;
+            coins += 20;
+            updateHUD();
+          }
+          // Rimuovi proiettile
+          scene.remove(bullet);
+          bullets.splice(i,1);
+        }
+      });
+    });
+  }
+
+  // Muovi nemici casualmente
+  function moveEnemies(delta){
+    enemies.forEach(enemy => {
+      if(!enemy.userData.isAlive) return;
+      const step = delta * 2;
+      enemy.position.x += (Math.random() - 0.5) * step;
+      enemy.position.z += (Math.random() - 0.5) * step;
+    });
+    helicopters.forEach(heli => {
+      if(!heli.userData.isAlive) return;
+      const step = delta * 1.5;
+      heli.position.x += (Math.random() - 0.5) * step;
+      heli.position.z += (Math.random() - 0.5) * step;
+      heli.position.y = 5 + Math.sin(Date.now() * 0.002) * 0.5;
+    });
+  }
+
+  // Funzione morte giocatore: reset stato gioco
+  function playerDies(){
+    health = 100;
+    ammo = 20;
+    kills = 0;
+    coins = 0;
+    playerHitCount = 0;
+    updateHUD();
+
+    // Rimuovi nemici ed elicotteri vecchi
+    enemies.forEach(e => scene.remove(e));
+    enemies.length = 0;
+    helicopters.forEach(h => scene.remove(h));
+    helicopters.length = 0;
+
+    spawnEnemies(5);
+    spawnHelicopters(2);
+  }
+
+  // Gestione movimento giocatore
+  const clock = new THREE.Clock();
+  function animate(){
+    requestAnimationFrame(animate);
+
+    const delta = clock.getDelta();
+    if(controls.isLocked){
+      velocity.x -= velocity.x * 10 * delta;
+      velocity.z -= velocity.z * 10 * delta;
+
+      direction.z = Number(move.forward) - Number(move.backward);
+      direction.x = Number(move.right) - Number(move.left);
+      direction.normalize();
+
+      if(move.forward || move.backward) velocity.z -= direction.z * 40 * delta;
+      if(move.left || move.right) velocity.x -= direction.x * 40 * delta;
+
+      controls.moveRight(-velocity.x * delta);
+      controls.moveForward(-velocity.z * delta);
+
+      enemiesShoot(performance.now());
+    }
+
+    moveEnemies(delta);
+    checkBulletHits();
+
+    renderer.render(scene, camera);
+  }
+
+  // Start gioco
+  spawnEnemies(5);
+  spawnHelicopters(2);
+  updateHUD();
+  animate();
+})();
+</script>
+</body>
+</html>
